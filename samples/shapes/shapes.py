@@ -15,14 +15,20 @@ import math
 import random
 import numpy as np
 import cv2
+import matplotlib
+import matplotlib.pyplot as plt
+from mrcnn.config import Config
+from mrcnn import utils
+import mrcnn.model as modellib
+from mrcnn import visualize
+from mrcnn.model import log
 
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
 
 # Import Mask RCNN
 sys.path.append(ROOT_DIR)  # To find local version of the library
-from mrcnn.config import Config
-from mrcnn import utils
+
 
 
 class ShapesConfig(Config):
@@ -189,3 +195,43 @@ class ShapesDataset(utils.Dataset):
             np.array(boxes), np.arange(N), 0.3)
         shapes = [s for i, s in enumerate(shapes) if i in keep_ixs]
         return bg_color, shapes
+
+
+def get_ax(rows=1, cols=1, size=8):
+    """Return a Matplotlib Axes array to be used in
+    all visualizations in the notebook. Provide a
+    central point to control graph sizes.
+
+    Change the default size attribute to control the size
+    of rendered images
+    """
+    _, ax = plt.subplots(rows, cols, figsize=(size * cols, size * rows))
+    return ax
+
+if __name__=='__main__':
+    MODEL_DIR = os.path.join(ROOT_DIR, "logs")
+
+    # Local path to trained weights file
+    COCO_MODEL_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
+    # Download COCO trained weights from Releases if needed
+    if not os.path.exists(COCO_MODEL_PATH):
+        utils.download_trained_weights(COCO_MODEL_PATH)
+
+    config = ShapesConfig()
+    config.display()
+
+    dataset_train = ShapesDataset()
+    dataset_train.load_shapes(500, config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1])
+    dataset_train.prepare()
+
+    # Validation dataset
+    dataset_val = ShapesDataset()
+    dataset_val.load_shapes(50, config.IMAGE_SHAPE[0], config.IMAGE_SHAPE[1])
+    dataset_val.prepare()
+
+    image_ids = np.random.choice(dataset_train.image_ids, 4)
+    print(image_ids)
+    for image_id in image_ids:
+        image = dataset_train.load_image(image_id)
+        mask, class_ids = dataset_train.load_mask(image_id)
+        visualize.display_top_masks(image, mask, class_ids, dataset_train.class_names)

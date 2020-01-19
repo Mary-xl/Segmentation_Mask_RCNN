@@ -339,6 +339,7 @@ class ProposalLayer(KE.Layer):
 def log2_graph(x):
     """Implementation of Log2. TF doesn't have a native implementation."""
     return tf.log(x) / tf.log(2.0)
+    #return tf.math.log(x)/tf.math.log(2.0) #add by Xun
 
 
 class PyramidROIAlign(KE.Layer):
@@ -2155,9 +2156,12 @@ class MaskRCNN():
         metrics. Then calls the Keras compile() function.
         """
         # Optimizer object
-        optimizer = keras.optimizers.SGD(
-            lr=learning_rate, momentum=momentum,
-            clipnorm=self.config.GRADIENT_CLIP_NORM)
+        # optimizer = keras.optimizers.SGD(
+        #     lr=learning_rate, momentum=momentum,
+        #     clipnorm=self.config.GRADIENT_CLIP_NORM)
+
+        optimizer = keras.optimizers.Adagrad(learning_rate=learning_rate)
+
         # Add Losses
         # First, clear previously set losses to avoid duplication
         self.keras_model._losses = []
@@ -2196,7 +2200,8 @@ class MaskRCNN():
             loss = (
                 tf.reduce_mean(layer.output, keepdims=True)
                 * self.config.LOSS_WEIGHTS.get(name, 1.))
-            self.keras_model.metrics_tensors.append(loss)
+            #self.keras_model.metrics_tensors.append(loss)
+            self.keras_model.metrics.append(loss)
 
     def set_trainable(self, layer_regex, keras_model=None, indent=0, verbose=1):
         """Sets model layers as trainable if their names match

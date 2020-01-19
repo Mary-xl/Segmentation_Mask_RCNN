@@ -29,11 +29,11 @@ Usage: import the module (see Jupyter notebooks for examples), or run from
 # This has to be done before other importa that might
 # set it, but only if we're running in script mode
 # rather than being imported.
-if __name__ == '__main__':
-    import matplotlib
-    # Agg backend runs without a display
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
+# if __name__ == '__main__':
+#     import matplotlib
+#     # Agg backend runs without a display
+#     matplotlib.use('Agg')
+#     import matplotlib.pyplot as plt
 
 import os
 import sys
@@ -42,9 +42,19 @@ import datetime
 import numpy as np
 import skimage.io
 from imgaug import augmenters as iaa
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import time
+import concurrent.futures
 
 # Root directory of the project
-ROOT_DIR = os.path.abspath("../../")
+ROOT_DIR = os.getcwd()
+if ROOT_DIR.endswith("samples/nucleus"):
+    # Go up two levels to the repo root
+    ROOT_DIR = os.path.dirname(os.path.dirname(ROOT_DIR))
+print (ROOT_DIR)
+
+DATASET_DIR = '/home/mary/AI/data/nucleus/data-science-bowl-2018'
 
 # Import Mask RCNN
 sys.path.append(ROOT_DIR)  # To find local version of the library
@@ -52,6 +62,8 @@ from mrcnn.config import Config
 from mrcnn import utils
 from mrcnn import model as modellib
 from mrcnn import visualize
+from mrcnn.visualize import display_images
+from mrcnn.model import log
 
 # Path to trained weights file
 COCO_WEIGHTS_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
@@ -175,6 +187,9 @@ class NucleusInferenceConfig(NucleusConfig):
     # You can increase this during training to generate more propsals.
     RPN_NMS_THRESHOLD = 0.7
 
+#=================================2
+class NoResizeConfig(NucleusConfig):
+    IMAGE_RESIZE_MODE = "none"
 
 ############################################################
 #  Dataset
@@ -401,9 +416,322 @@ def detect(model, dataset_dir, subset):
     print("Saved to ", submit_dir)
 
 
+def show_image_size(stats):
+    # Image stats
+    image_shape = np.array([s['shape'] for s in stats])
+    image_color = np.array([s['color'] for s in stats])
+    print("Image Count: ", image_shape.shape[0])
+    print("Height  mean: {:.2f}  median: {:.2f}  min: {:.2f}  max: {:.2f}".format(
+        np.mean(image_shape[:, 0]), np.median(image_shape[:, 0]),
+        np.min(image_shape[:, 0]), np.max(image_shape[:, 0])))
+    print("Width   mean: {:.2f}  median: {:.2f}  min: {:.2f}  max: {:.2f}".format(
+        np.mean(image_shape[:, 1]), np.median(image_shape[:, 1]),
+        np.min(image_shape[:, 1]), np.max(image_shape[:, 1])))
+    print("Color   mean (RGB): {:.2f} {:.2f} {:.2f}".format(*np.mean(image_color, axis=0)))
+
+    # Histograms
+    fig, ax = plt.subplots(1, 3, figsize=(16, 4))
+    ax[0].set_title("Height")
+    _ = ax[0].hist(image_shape[:, 0], bins=20)
+    ax[1].set_title("Width")
+    _ = ax[1].hist(image_shape[:, 1], bins=20)
+    ax[2].set_title("Height & Width")
+    _ = ax[2].hist2d(image_shape[:, 1], image_shape[:, 0], bins=10, cmap="Blues")
+
+def dataset():
+
+    config = NoResizeConfig()
+    # Load dataset
+    dataset = NucleusDataset()
+    # The subset is the name of the sub-directory, such as stage1_train,
+    # stage1_test, ...etc. You can also use these special values:
+    #     train: loads stage1_train but excludes validation images
+    #     val: loads validation images from stage1_train. For a list
+    #          of validation images see nucleus.py
+    dataset.load_nucleus(DATASET_DIR, subset="train")
+
+    # Must call before using the dataset
+    dataset.prepare()
+
+    print("Image Count: {}".format(len(dataset.image_ids)))
+    print("Class Count: {}".format(dataset.num_classes))
+    for i, info in enumerate(dataset.class_info):
+        print("{:3}. {:50}".format(i, info['name']))
+
+    image_ids = np.random.choice(dataset.image_ids, 4)
+    for image_id in image_ids:
+        image = dataset.load_image(image_id)
+        mask, class_ids = dataset.load_mask(image_id)
+        visualize.display_top_masks(image, mask, class_ids, dataset.class_names, limit=1)
+
+    #Example of loading image by id------------------------------------------------
+    source_id = "ed5be4b63e9506ad64660dd92a098ffcc0325195298c13c815a73773f1efc279"
+    # Map source ID to Dataset image_id
+    # Notice the nucleus prefix: it's the name given to the dataset in NucleusDataset
+    image_id = dataset.image_from_source_map["nucleus.{}".format(source_id)]
+
+    # Load and display
+    image, image_meta, class_ids, bbox, mask = modellib.load_image_gt(
+        dataset, config, image_id, use_mini_mask=False)
+    log("molded_image", image)
+    log("mask", mask)
+    visualize.display_instances(image, bbox, mask, class_ids, dataset.class_names,
+                            show_bbox=True)
+
+    def image_stats(image_id):
+        """Returns a dict of stats for one image."""
+        image = dataset.load_image(image_id)
+        mask, _ = dataset.load_mask(image_id)
+        bbox = utils.extract_bboxes(mask)
+        # Sanity check
+        assert mask.shape[:2] == image.shape[:2]
+        # Return stats dict
+        return {
+            "id": image_id,
+            "shape": list(image.shape),
+            "bbox": [[b[2] - b[0], b[3] - b[1]]
+                     for b in bbox
+                     # Uncomment to exclude nuclei with 1 pixel width
+                     # or height (often on edges)
+                     # if b[2] - b[0] > 1 and b[3] - b[1] > 1
+                     ],
+            "color": np.mean(image, axis=(0, 1)),
+        }
+
+    #load data time -----------------------------------------------------------
+    t_start = time.time()
+    with concurrent.futures.ThreadPoolExecutor() as e:
+         stats = list(e.map(image_stats,dataset.image_ids))
+         t_total = time.time() - t_start
+    print("Total time: {:.1f} seconds".format(t_total))
+
+    show_image_size(stats)
+
+    image_area_bins = [256 ** 2, 600 ** 2, 1300 ** 2]
+
+    #get image area----------------------------------------------------
+    print("Nuclei/Image")
+    fig, ax = plt.subplots(1, len(image_area_bins), figsize=(16, 4))
+    area_threshold = 0
+    for i, image_area in enumerate(image_area_bins):
+        nuclei_per_image = np.array([len(s['bbox'])
+                                     for s in stats
+                                     if area_threshold < (s['shape'][0] * s['shape'][1]) <= image_area])
+        area_threshold = image_area
+        if len(nuclei_per_image) == 0:
+            print("Image area <= {:4}**2: None".format(np.sqrt(image_area)))
+            continue
+        print("Image area <= {:4.0f}**2:  mean: {:.1f}  median: {:.1f}  min: {:.1f}  max: {:.1f}".format(
+            np.sqrt(image_area), nuclei_per_image.mean(), np.median(nuclei_per_image),
+            nuclei_per_image.min(), nuclei_per_image.max()))
+        ax[i].set_title("Image Area <= {:4}**2".format(np.sqrt(image_area)))
+        _ = ax[i].hist(nuclei_per_image, bins=10)
+
+    # get nucleus area
+    fig, ax = plt.subplots(1, len(image_area_bins), figsize=(16, 4))
+    area_threshold = 0
+    for i, image_area in enumerate(image_area_bins):
+        nucleus_shape = np.array([
+            b
+            for s in stats if area_threshold < (s['shape'][0] * s['shape'][1]) <= image_area
+            for b in s['bbox']])
+        nucleus_area = nucleus_shape[:, 0] * nucleus_shape[:, 1]
+        area_threshold = image_area
+
+        print("\nImage Area <= {:.0f}**2".format(np.sqrt(image_area)))
+        print("  Total Nuclei: ", nucleus_shape.shape[0])
+        print("  Nucleus Height. mean: {:.2f}  median: {:.2f}  min: {:.2f}  max: {:.2f}".format(
+            np.mean(nucleus_shape[:, 0]), np.median(nucleus_shape[:, 0]),
+            np.min(nucleus_shape[:, 0]), np.max(nucleus_shape[:, 0])))
+        print("  Nucleus Width.  mean: {:.2f}  median: {:.2f}  min: {:.2f}  max: {:.2f}".format(
+            np.mean(nucleus_shape[:, 1]), np.median(nucleus_shape[:, 1]),
+            np.min(nucleus_shape[:, 1]), np.max(nucleus_shape[:, 1])))
+        print("  Nucleus Area.   mean: {:.2f}  median: {:.2f}  min: {:.2f}  max: {:.2f}".format(
+            np.mean(nucleus_area), np.median(nucleus_area),
+            np.min(nucleus_area), np.max(nucleus_area)))
+
+        # Show 2D histogram
+        _ = ax[i].hist2d(nucleus_shape[:, 1], nucleus_shape[:, 0], bins=20, cmap="Blues")
+
+
+def mini_mask():
+
+    config = NoResizeConfig()  #not resize original image
+    # Load dataset
+    dataset = NucleusDataset()
+    dataset.load_nucleus(DATASET_DIR, subset="train")
+    # Must call before using the dataset
+    dataset.prepare()
+
+
+    # Load random image and mask.
+    image_id = np.random.choice(dataset.image_ids, 1)[0]
+    image = dataset.load_image(image_id)
+    mask, class_ids = dataset.load_mask(image_id)
+    original_shape = image.shape
+
+
+    # Here actually no resize was done since NoResizeConfig(), just display original image
+    image, window, scale, padding, _ = utils.resize_image(
+        image,
+        min_dim=config.IMAGE_MIN_DIM,
+        max_dim=config.IMAGE_MAX_DIM,
+        mode=config.IMAGE_RESIZE_MODE)
+    mask = utils.resize_mask(mask, scale, padding)
+    # Compute Bounding box
+    bbox = utils.extract_bboxes(mask)
+
+    # Display image and additional stats
+    print("image_id: ", image_id, dataset.image_reference(image_id))
+    print("Original shape: ", original_shape)
+    log("image", image)
+    log("mask", mask)
+    log("class_ids", class_ids)
+    log("bbox", bbox)
+    # Display image and instances
+    visualize.display_instances(image, bbox, mask, class_ids, dataset.class_names)
+
+    #image_id = np.random.choice(dataset.image_ids, 1)[0]
+    image, image_meta, class_ids, bbox, mask = modellib.load_image_gt(
+        dataset, config, image_id, use_mini_mask=False)
+
+    log("image", image)
+    log("image_meta", image_meta)
+    log("class_ids", class_ids)
+    log("bbox", bbox)
+    log("mask", mask)
+
+    display_images([image] + [mask[:, :, i] for i in range(min(mask.shape[-1], 7))])
+
+    # Add augmentation and mask resizing.
+    image, image_meta, class_ids, bbox, mask = modellib.load_image_gt(
+        dataset, config, image_id, augment=True, use_mini_mask=True)
+    log("mask", mask)
+    display_images([image] + [mask[:, :, i] for i in range(min(mask.shape[-1], 7))])
+
+    # Display augmented image with restored mask
+    mask = utils.expand_mask(bbox, mask, image.shape)
+    visualize.display_instances(image, bbox, mask, class_ids, dataset.class_names)
+
+
+
+def visualize_anchors():
+    class RandomCropConfig(NucleusConfig):
+        IMAGE_RESIZE_MODE = "crop"
+        IMAGE_MIN_DIM = 256
+        IMAGE_MAX_DIM = 256
+
+    config = NoResizeConfig()
+    crop_config = RandomCropConfig()
+    dataset = NucleusDataset()
+    dataset.load_nucleus(DATASET_DIR, subset="train")
+    # Must call before using the dataset
+    dataset.prepare()
+    ## Visualize anchors of one cell at the center of the feature map
+
+    # Load and display random image
+    image_id = np.random.choice(dataset.image_ids, 1)[0]
+    image, image_meta, _, _, _ = modellib.load_image_gt(dataset, crop_config, image_id)
+
+    # Generate Anchors
+    backbone_shapes = modellib.compute_backbone_shapes(config, image.shape)
+    anchors = utils.generate_pyramid_anchors(config.RPN_ANCHOR_SCALES,
+                                             config.RPN_ANCHOR_RATIOS,
+                                             backbone_shapes,
+                                             config.BACKBONE_STRIDES,
+                                             config.RPN_ANCHOR_STRIDE)
+
+    # Print summary of anchors
+    num_levels = len(backbone_shapes)
+    anchors_per_cell = len(config.RPN_ANCHOR_RATIOS)
+    print("Count: ", anchors.shape[0])
+    print("Scales: ", config.RPN_ANCHOR_SCALES)
+    print("ratios: ", config.RPN_ANCHOR_RATIOS)
+    print("Anchors per Cell: ", anchors_per_cell)
+    print("Levels: ", num_levels)
+    anchors_per_level = []
+    for l in range(num_levels):
+        num_cells = backbone_shapes[l][0] * backbone_shapes[l][1]
+        anchors_per_level.append(anchors_per_cell * num_cells // config.RPN_ANCHOR_STRIDE ** 2)
+        print("Anchors in Level {}: {}".format(l, anchors_per_level[l]))
+
+    # Display
+    fig, ax = plt.subplots(1, figsize=(10, 10))
+    ax.imshow(image)
+    levels = len(backbone_shapes)
+
+
+    for level in range(levels):
+        colors = visualize.random_colors(levels)
+        # Compute the index of the anchors at the center of the image
+        level_start = sum(anchors_per_level[:level])  # sum of anchors of previous levels
+        level_anchors = anchors[level_start:level_start + anchors_per_level[level]]
+        print("Level {}. Anchors: {:6}  Feature map Shape: {}".format(level, level_anchors.shape[0],
+                                                                      backbone_shapes[level]))
+        center_cell = backbone_shapes[level] // 2
+        center_cell_index = (center_cell[0] * backbone_shapes[level][1] + center_cell[1])
+        level_center = center_cell_index * anchors_per_cell
+        center_anchor = anchors_per_cell * (
+                (center_cell[0] * backbone_shapes[level][1] / config.RPN_ANCHOR_STRIDE ** 2) \
+                + center_cell[1] / config.RPN_ANCHOR_STRIDE)
+        level_center = int(center_anchor)
+
+        # Draw anchors. Brightness show the order in the array, dark to bright.
+        for i, rect in enumerate(level_anchors[level_center:level_center + anchors_per_cell]):
+            y1, x1, y2, x2 = rect
+            p = patches.Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=2, facecolor='none',
+                                  edgecolor=(i + 1) * np.array(colors[level]) / anchors_per_cell)
+            ax.add_patch(p)
+    plt.show()
+
+
+def Data_Generator():
+    class RandomCropConfig(NucleusConfig):
+        IMAGE_RESIZE_MODE = "crop"
+        IMAGE_MIN_DIM = 256
+        IMAGE_MAX_DIM = 256
+
+    config = NoResizeConfig()
+    crop_config = RandomCropConfig()
+    dataset = NucleusDataset()
+    dataset.load_nucleus(DATASET_DIR, subset="train")
+    dataset.prepare()
+    image_id = np.random.choice(dataset.image_ids, 1)[0]
+    random_rois = 2000
+    g = modellib.data_generator(
+        dataset, crop_config, shuffle=True, random_rois=random_rois,
+        batch_size=4,
+        detection_targets=True)
+    # Get Next Image
+    if random_rois:
+        [normalized_images, image_meta, rpn_match, rpn_bbox, gt_class_ids, gt_boxes, gt_masks, rpn_rois, rois], \
+        [mrcnn_class_ids, mrcnn_bbox, mrcnn_mask] = next(g)
+
+        log("rois", rois)
+        log("mrcnn_class_ids", mrcnn_class_ids)
+        log("mrcnn_bbox", mrcnn_bbox)
+        log("mrcnn_mask", mrcnn_mask)
+    else:
+        [normalized_images, image_meta, rpn_match, rpn_bbox, gt_boxes, gt_masks], _ = next(g)
+
+    log("gt_class_ids", gt_class_ids)
+    log("gt_boxes", gt_boxes)
+    log("gt_masks", gt_masks)
+    log("rpn_match", rpn_match, )
+    log("rpn_bbox", rpn_bbox)
+    image_id = modellib.parse_image_meta(image_meta)["image_id"][0]
+    print("image_id: ", image_id, dataset.image_reference(image_id))
+
+    # Remove the last dim in mrcnn_class_ids. It's only added
+    # to satisfy Keras restriction on target shape.
+    mrcnn_class_ids = mrcnn_class_ids[:, :, 0]
+
+
 ############################################################
 #  Command Line
 ############################################################
+
+
 
 if __name__ == '__main__':
     import argparse
@@ -415,16 +743,19 @@ if __name__ == '__main__':
                         metavar="<command>",
                         help="'train' or 'detect'")
     parser.add_argument('--dataset', required=False,
-                        metavar="/path/to/dataset/",
+                        metavar="/path/to/dataset",
+                        default="/home/mary/AI/data/nucleus/data-science-bowl-2018",
                         help='Root directory of the dataset')
     parser.add_argument('--weights', required=True,
-                        metavar="/path/to/weights.h5",
+                        metavar='/path/to/h5',
+                        default=COCO_WEIGHTS_PATH,
                         help="Path to weights .h5 file or 'coco'")
     parser.add_argument('--logs', required=False,
                         default=DEFAULT_LOGS_DIR,
                         metavar="/path/to/logs/",
                         help='Logs and checkpoints directory (default=logs/)')
     parser.add_argument('--subset', required=False,
+                        default='train',
                         metavar="Dataset sub-directory",
                         help="Subset of dataset to run prediction on")
     args = parser.parse_args()
@@ -435,11 +766,11 @@ if __name__ == '__main__':
     elif args.command == "detect":
         assert args.subset, "Provide --subset to run prediction on"
 
-    print("Weights: ", args.weights)
-    print("Dataset: ", args.dataset)
-    if args.subset:
-        print("Subset: ", args.subset)
-    print("Logs: ", args.logs)
+    # print("Weights: ", args.weights)
+    # print("Dataset: ", args.dataset)
+    # if args.subset:
+    #     print("Subset: ", args.subset)
+    # print("Logs: ", args.logs)
 
     # Configurations
     if args.command == "train":
@@ -447,6 +778,16 @@ if __name__ == '__main__':
     else:
         config = NucleusInferenceConfig()
     config.display()
+
+#===========================================================================
+    #dataset()
+    #mini_mask()
+    #visualize_anchors()
+    #Data_Generator()
+#===========================================================================
+
+
+
 
     # Create model
     if args.command == "train":
@@ -471,6 +812,10 @@ if __name__ == '__main__':
     else:
         weights_path = args.weights
 
+    print (args.dataset)
+    print (args.subset)
+
+
     # Load weights
     print("Loading weights ", weights_path)
     if args.weights.lower() == "coco":
@@ -490,3 +835,4 @@ if __name__ == '__main__':
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'detect'".format(args.command))
+
